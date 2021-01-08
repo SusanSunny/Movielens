@@ -1,0 +1,517 @@
+---
+title: "Flu shot learning"
+author: "SusanSunny"
+date: "1/7/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Suppress summarise info
+options(dplyr.summarise.inform = FALSE)
+
+##Import packages
+if(!require(glmnet)) install.packages("glmnet", repos = "http://cran.us.r-project.org")
+if(!require(readr)) install.packages("readr", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(xgboost)) install.packages("xgboost", repos = "http://cran.us.r-project.org")
+if(!require(igraph)) install.packages("igraph", repos = "http://cran.us.r-project.org")
+if(!require(e1071)) install.packages("e1071", repos = "http://cran.us.r-project.org")
+if(!require(pROC)) install.packages("pROC", repos = "http://cran.us.r-project.org")
+if(!require(glmnet)) install.packages("glmnet", repos = "http://cran.us.r-project.org")
+if(!require(ggpubr)) install.packages("ggpubr", repos = "http://cran.us.r-project.org")
+
+library(readr)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(dplyr)
+library(igraph)
+library(e1071)
+library(pROC)
+library(glmnet)
+library(ggpubr)
+```
+
+## 1 Introduction
+This project is being completed as the last part of the Harvard X Data Science program. 
+
+## 1.1 Project Aim 
+For this project, I chose the data set from the "flu shot learning" competition published on drivendata.org. The aim of the challenge is to predict H1N1 and seasonal flu vaccination rates from a number of predictors. The primary evaluation metric is the area under the receiver operating characteristic curve (AUROC). 
+
+## 1.2 Project Overview 
+This report contains the result from two machine learning methods: 
+
+Firstly, random forests are constructed with the package xgboost. 
+
+Secondly, linear regression is performed using the package glmnet. 
+
+I chose to only predict the h1n1_vaccination rates for this report in order to keep it more clear. The prediction for the seasonal_vaccination rate can be performed analogously. 
+
+## 2 Methods and Analysis
+
+## 2.1 Data Cleaning and Exploration
+
+## 2.1.1 Download and overview of datasets 
+Since the data can only be downloaded from drivendata.org if logging in with an account, I have uploaded the data on my github account, from which the two datasets are downloaded in the R script. 
+
+```{r import data, include=FALSE}
+
+##Import data from github
+#Import training features 
+url<- "https://raw.githubusercontent.com/SusanSunny/Movielens/main/Flu_Shot_Learning_Predict_H1N1_and_Seasonal_Flu_Vaccines_-_Training_Features.csv"
+destination_file<- "train_features.csv"
+download.file(url, destination_file)
+flu_features<- read_csv("train_features.csv")
+file.remove("train_features.csv")
+
+#Import training labels 
+url2<- "https://raw.githubusercontent.com/SusanSunny/Movielens/main/Flu_Shot_Learning_Predict_H1N1_and_Seasonal_Flu_Vaccines_-_Training_Labels.csv"
+destination_file<- "train_labels.csv"
+download.file(url2, destination_file)
+
+flu_labels<- read_csv("train_labels.csv")
+flu_labels
+file.remove("train_labels.csv")
+
+```
+
+The first dataset (flu_features) contains an ID for each entry (respondent_id) and 35 predictors (features), e.g. h1n1_concern, behavioral_face_mask, age_group, education, race,  sex. 
+Some predictors are numerical values and others are character strings. As we can already see from the first entries, flu_features contains NAs. 
+
+```{r flu_features, echo=FALSE}
+str(as.data.frame(flu_features), give.attr=FALSE)
+```
+
+The second dataset (flu_labels) also contains the respondent_id, so that the labels can be matched with the predictors and the response variables h1n1_vaccine and seasonal_vaccine. 
+
+Both dataset consist of 26707 rows. 
+
+```{r flu_labels, echo=FALSE}
+str(as.data.frame(flu_labels), give.attr=FALSE)
+```
+
+The next section explains how the NAs are removed.
+
+## 2.1.2 Removal of NA's 
+
+The following table shows that there are NA's in nearly all columns of the data set. In some columns around half of the rows contain NAs. 
+
+```{r NA columns, echo=FALSE}
+number_of_NAs<-sapply(flu_features, function(x) sum(is.na(x)))
+as.data.frame(number_of_NAs)
+```
+
+Furthermore, only 6437 of the 26707 rows contain no NA's at all. 
+
+```{r NA rows, echo = FALSE}
+row_na<- vector(mode="logical", length= nrow(flu_features))
+for (i in 1:nrow(flu_features)){
+  row_na[i]<-all(!is.na(flu_features[i,]))
+}
+#6437 rows with no missing data 
+sum(row_na)
+```
+
+Since the number of rows without NA's is so small, it seems useful to replace the NAs with suitable values. 
+I decided to replace the NA's in numerical columns with the column mean value. 
+Whereas the NA's in the character string columns, I treated as a different value by replacing it with an empty string. 
+
+```{r number of movies per year, echo = FALSE}
+#change NAs in numeric columns to mean of column 
+change_na<- function(x){
+  x[is.na(x)]<-mean(x,na.rm=TRUE)
+  x
+}
+numeric_cols<- c(1:22, 33:34) #columns with numerics
+#apply function to the columns with numerics
+flu_features[numeric_cols]<-lapply(flu_features[numeric_cols], change_na)#apply function to the columns with numerics
+
+#change NAs in string columns to empty string 
+change_na_char<- function(x){
+  x[is.na(x)]<- ""
+  x
+}
+string_cols<- c(23:32, 35:36) #columns which contain strings 
+flu_features[string_cols]<-lapply(flu_features[string_cols], change_na_char) #apply function to the columns that contain strings
+``` 
+
+```{r flu_all, include=FALSE}
+#create tibble with features and labels for data exploration 
+flu_all<- left_join(flu_features, flu_labels)
+sum(is.na(flu_all)) #-> all NAs are removed 
+```
+
+## 2.1.3 Factors and ordering
+
+For both, the purpose of fitting a linear model and for the purpose of fitting a random forest, it is useful to choose an ordering for the factors representing the character strings which is compatible with the mean vaccination rate per factor level. 
+
+As we can see from the following plots, the original ordering does not show a monotone dependency of vaccination on factor level. 
+
+```{r Graphs, echo=FALSE, fig.height=9}
+####Age group####
+#proportion of h1n1 vaccinations each age group
+h1<-flu_all%>%group_by(age_group)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(age_group, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90))
+
+####Education####
+#proportion of h1n1 vaccinations depending on education
+h2<-flu_all%>%group_by(education)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(education, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90))
+
+####Race####
+#proportion of h1n1 vaccinations depending on race
+h3<-flu_all%>%group_by(race)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(race, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90))
+
+####Sex####
+#proportion of h1n1 vaccinations depending on race
+h4<-flu_all%>%group_by(sex)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(sex, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90))
+
+####Income poverty####
+#proportion of h1n1 vaccinations depending on income poverty
+h5<-flu_all%>%group_by(income_poverty)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(income_poverty, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90, size = 7))
+
+####Census_msa####
+#proportion of h1n1 vaccinations depending on income poverty
+h6<-flu_all%>%group_by(census_msa)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(census_msa, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90, size = 7))
+
+####Rent_or_own####
+#proportion of h1n1 vaccinations depending on income poverty
+h7<-flu_all%>%group_by(rent_or_own)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(rent_or_own, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90))
+
+####Marital_status####
+#proportion of h1n1 vaccinations depending on income poverty
+h8<-flu_all%>%group_by(marital_status)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(marital_status, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90))
+
+####Employment status####
+#proportion of h1n1 vaccinations depending on income poverty
+h9<-flu_all%>%group_by(employment_status)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(employment_status, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90, size=5))
+
+####Employment industry####
+#proportion of h1n1 vaccinations depending on income poverty
+h10<-flu_all%>%group_by(employment_industry)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(employment_industry, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90, size= 5))
+
+####Employment occupation####
+#proportion of h1n1 vaccinations depending on income poverty
+h11<-flu_all%>%group_by(employment_occupation)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(employment_occupation, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90, size= 5))
+
+####region####
+#proportion of h1n1 vaccinations depending on income poverty
+h12<-flu_all%>%group_by(hhs_geo_region)%>%
+  summarize(prop_h1n1 = sum(h1n1_vaccine)/n())%>%
+  ggplot(aes(hhs_geo_region, prop_h1n1))+
+  geom_point()+
+  theme(axis.text.x = element_text(angle = 90, size= 5))
+
+ggarrange(h1, h2, h3, h4, h5, h6, ncol=3, nrow=2)
+ggarrange(h7, h8, h9, h10, h11, h12, ncol=3, nrow=2)
+
+```
+
+
+```{r factors, echo=FALSE}
+#add levels to columns with strings 
+#in order to use xgboost and convert the character strings into factors later
+#the factors are ordered either in a natural way or, if not possible, in the order of the proportions of vaccinations beginning with the lowest
+#ordered by hand getting the order from the ggplot graphs 
+flu_features$age_group<-as.factor(ordered(flu_features$age_group, levels=c("18 - 34 Years", "35 - 44 Years","45 - 54 Years", "55 - 64 Years", "65+ Years")))
+flu_features$education<-as.factor(ordered(flu_features$education, levels=c("", "< 12 Years","12 Years", "Some College","College Graduate" )))
+flu_features$race<-as.factor(ordered(flu_features$race, levels=c("Black", "Hispanic", "Other or Multiple", "White")))
+flu_features$sex<-as.factor(ordered(flu_features$sex, levels=c("Male", "Female")))
+flu_features$income_poverty<-as.factor(ordered(flu_features$income_poverty, levels=c("", "Below Poverty", "<= $75,000, Above Poverty", "> $75,000")))
+flu_features$marital_status<-as.factor(ordered(flu_features$marital_status, levels=c("", "Not Married", "Married")))
+flu_features$rent_or_own<-as.factor(ordered(flu_features$rent_or_own, levels=c("Rent", "", "Own")))
+flu_features$employment_status<-as.factor(ordered(flu_features$employment_status, levels=c("Unemployed", "", "Employed", "Not in Labor Force")))
+flu_features$census_msa<-as.factor(ordered(flu_features$census_msa, levels=c("MSA, Principle City", "Non-MSA", "MSA, Not Principle  City")))
+
+#order hss_geo_region, employment_occupation and change values to Letters 
+#hhs_geo_region
+levels_geo<-flu_all%>%group_by(hhs_geo_region)%>%
+  summarize(proportion=sum(h1n1_vaccine==1)/n())%>%
+  arrange(proportion)%>%.$hhs_geo_region
+flu_features$hhs_geo_region<- as.factor(ordered(flu_features$hhs_geo_region, levels= levels_geo, labels = LETTERS[1:length(levels_geo)]))
+
+#employment_occupation
+levels_occupation<-flu_all%>%group_by(employment_occupation)%>%
+  summarize(proportion=sum(h1n1_vaccine==1)/n())%>%
+  arrange(proportion)%>%.$employment_occupation
+flu_features$employment_occupation<- as.factor(ordered(flu_features$employment_occupation, levels= levels_occupation, labels = LETTERS[1:length(levels_occupation)]))
+
+#Employment_industry
+levels_industry<-flu_all%>%group_by(employment_industry)%>%
+  summarize(proportion=sum(h1n1_vaccine==1)/n())%>%
+  arrange(proportion)%>%.$employment_industry
+flu_features$employment_industry<- as.factor(ordered(flu_features$employment_industry, levels= levels_industry, labels = LETTERS[1:length(levels_industry)]))
+```
+
+## 2.2 Analysis 
+
+
+## 2.2.1 Random Forests with xgboost 
+Xgboost is a powerful R package which can be used to build ensembles of decision trees (random forests) using gradient boosting algorithms.
+Random Forests are a machine learning method in which a large number of decision trees are built, each fitted with a random portion of the data. The prediction of the ensemble is built as a weighted sum of all the trees in the model.
+
+I used the function xgb.cv to optimize the parameters for the xgboost model. Experimentation showed that a learning rate of 0.02 roughly leads to 500 trees per forest which was still manageable on a normal PC. An even lower learning rate might have led to even better models, but 0.02 seems to be a good compromise. 
+It is important that every decision tree is fitted on a subset of the data so that the decision trees vary from each other enough. Therefore, the parameter subsample needs to be chosen smaller than 1. On the other hand the decision trees should not be fitted on a too small sample size, otherwise only simple decision trees could be fitted to the small sample size. Eventually I decided for a subsample of 0.9. 
+Starting with a colsample_bytree of 0.7, I tried different values of gamma and maxdepth and chose gamma = 4, max_depth = 7. Given a gamma of 4 and maxdepth of 7, colsample_bytree = 0.5 led to a reasonable prediction performance. Running the function xgb.cv for many different values for the parameters takes quite some time, so that it is not included in this report. 
+
+The following code builds the xgboost model xgb:
+
+```{r xgboost, echo=TRUE}
+##xgboost
+
+#factors as integers
+flu_features_int1<- flu_features
+flu_features_int1[string_cols]<-lapply(flu_features[string_cols], function(x) as.integer(x))
+#remove respondent_id
+flu_features_int<- flu_features_int1[,2:36]
+
+#construct matrix for model
+data=xgb.DMatrix(data=as.matrix(flu_features_int), label = flu_labels$h1n1_vaccine)
+#train model 
+set.seed(1) 
+xgb<-xgb.train(data=data, objective= "binary:logistic", eval_metric="logloss", 
+          nrounds=500, eta = 0.02, gamma = 4, subsample = 0.9, 
+          colsample_bytree = 0.5, max_depth=7)
+```
+
+As can be seen from the upper graph, the higher the leaf depth, the more leafs a tree has.
+The plot below shows how many predictions are decided at each leaf depth. 
+
+```{r deepness, echo=FALSE}
+#model complexity: number of leafs and weighted cover against leaf depth 
+xgb.ggplot.deepness(xgb)
+```
+
+\newpage
+There is only one tree with maximum leaf depth 7, nearly all trees have a leaf depth of 8:
+
+```{r max.depth, echo=FALSE}
+#plot max depthness
+xgb.plot.deepness(xgb, "max.depth")
+#the majority of trees have leaf depth 8, very few have leaf depth 7
+```
+\newpage
+The median leaf depths range from 5 to 8. The most common median leaf depth is 7.
+
+```{r med depth, echo=FALSE}
+#plot med depth 
+xgb.plot.deepness(xgb, "med.depth") #median leaf depths of most trees is 7
+```
+
+This table and diagram show the importance of each variable. 
+We can see that for the h1n1_vaccine the most important predictors are the doctor_recc_h1n1, health_insurance, opinion_h1n1_risk and opinion_h1n1_vacc_effective. 
+
+```{r importance, echo = FALSE}
+#show importance of variables 
+feature_names<- colnames(flu_features_int)
+imp<-xgb.importance(feature_names=feature_names, model=xgb)
+imp
+##-> most important is doctor recommendation, opinion h1n1 risk and health insurance 
+xgb.plot.importance(imp, cex = 0.4)
+```
+
+The evaluation metric AUROC is calculated with the cross-validation function of the xgboost package and the built-in evaluation metric "auc". 
+
+```{r ROC, echo=TRUE}
+#Calculate AUROC
+set.seed(1)
+xbgcv<- xgb.cv(data=data, verbose=TRUE, print_every_n=100, nfold=5, 
+               objective="binary:logistic", eval_metric="auc", nrounds=500, 
+               eta=0.02, gamma=4, max_depth=7, subsample=0.9, colsample_bytree=0.5)
+```
+
+```{r evaluation, echo=FALSE}
+xbgcv$evaluation_log[500]
+auc_xgb<-xbgcv$evaluation_log[500]$test_auc_mean
+paste0("out-of-sample AUC:", auc_xgb)
+```
+
+The out-of-sample AUC is `r auc_xgb`. 
+
+## 2.2.2 Glmnet without one-hot encoding of the variables
+The linear model is built using the package glmnet. 
+
+```{r plot lambdas, echo=TRUE}
+
+##Linear Model with glmnet
+##without one-hot-encoding
+
+#Create test set 
+set.seed(1) #set seed to always get the same result 
+test_index <- createDataPartition(y = flu_labels$h1n1_vaccine, times = 1, p = 0.1, list = FALSE)
+test_index<- as.vector(test_index)
+x_train <- flu_features_int[-test_index,]
+x_test <- flu_features_int[test_index,]
+y_train <- flu_labels[-test_index,]
+y_test <- flu_labels[test_index,]
+
+##without one-hot-encoding (assume linearity because I ordered the variables by the mean response)
+#create matrix for cv.glmnet 
+glm_matrix1<-as.matrix(x_train)
+#model with 10-fold cross-validation
+set.seed(1)
+alpha<- 0.9 
+cvg1<-cv.glmnet(glm_matrix1, y_train$h1n1_vaccine, family = "binomial", alpha=alpha)
+```
+
+Here, the log(lambda) is plotted against the logloss (prediction error). 
+The smaller the penalty parameter lambda, the more variables are included in the model. In order to achieve the very best prediction error we could choose a lambda with the optimal prediction error. However, I choose the largest value of lambda, so that the error is within 1 standard error of the minimum, for a more robust model. 
+```{r plot, echo=FALSE}
+#plot log lambda against logloss (prediction error) in order to choose lambda 
+plot(cvg1) 
+#the larger the lambdas, the more variables are included in the model 
+```
+
+```{r lambdas, echo=FALSE}
+paste0("lambda with optimal prediction error: ",log(cvg1$lambda.min))
+paste0("largest value of lambda such that error is within 1 standard error of the minimum: ")
+paste0(log(cvg1$lambda.1se))
+
+```
+
+```{r model}
+#build model 
+glm_model1<-glmnet(glm_matrix1, y_train$h1n1_vaccine, family="binomial", alpha = 0.9)
+```
+
+If we look at the lambdas against the coefficients we can see how much influence each variable has depending on the lambda. One variable seems to have a high positive impact on the prediction. The majority of the variables have only a small influence. 
+
+```{r plot2, echo=FALSE}
+#plot log lambda against 
+plot(glm_model1, xvar= "lambda") 
+#shows how much influence each variable has for each lambda 
+#one variable has a lot higher influence than the others 
+```
+
+In order to calculate the AUROC I used the method auc from the pROC package. 
+```{r prediction2}
+#make prediction
+test_matrix<- as.matrix(x_test)
+pred1<-predict(glm_model1, test_matrix, type="response", s=cvg1$lambda.1se)
+#calculate AUC
+auc_glm1<-auc(y_test$h1n1_vaccine, as.vector(pred1))
+auc_glm1
+```
+
+## 2.2.3 Glmnet with one-hot-encoding 
+A linear model assumes a linear relationship between the variables. However, in our data set we also have variables that might not have a linear relationship. 
+If we don't want to assume a linear relationship between the variables, we can use one-hot-encoding of factor levels. This way each value of each factor level is made to a separated predictor. 
+
+```{r test und training set, echo= FALSE}
+x_train <- flu_features[-test_index,-1]
+x_test <- flu_features[test_index,-1]
+```
+
+```{r one-hot-encoding, Echo=TRUE}
+##Linear Model with glmnet
+##with one-hot-encoding
+
+#one-hot-encoding with makeX
+glm_matrix2<- makeX(x_train)
+
+```
+
+```{r include=FALSE}
+#model with 10-fold cross-validation
+set.seed(1)
+cvg2<-cv.glmnet(glm_matrix2, y_train$h1n1_vaccine, family = "binomial", alpha=0.9)
+#plot log lambda against logloss (prediction error) in order to choose lambda 
+#plot(cvg2) 
+#the larger the lambdas, the more variables are included in the model 
+log(cvg2$lambda.min)
+#from a lambda a little under exp(-6.68) the prediction error doesnt get smaller
+log(cvg2$lambda.1se)
+#from a lambda a little over exp(-5.00) the confidence interval of the prediction error is includes the best prediction error 
+#-> in order to achieve the very best prediction error, we could choose lambda of exp(-7.69)
+#however, I choose -5 in order to save time 
+```
+
+Now, we build the model using the same modeling approach, but with the one-hot-encoded matrix: 
+
+```{r }
+#build model 
+glm_model2<-glmnet(glm_matrix2, y_train$h1n1_vaccine, family="binomial", alpha = 0.9)
+```
+
+```{r eval=FALSE, include=FALSE}
+#plot log lambda against 
+plot(glm_model2, xvar= "lambda") 
+#shows how much influence the variables have for each lambda 
+#one variable has a lot higher influence than the others 
+```
+
+Indeed, the prediction is only slightly better than without one-hot-encoding. 
+
+```{r prediction}
+#make prediction
+test_matrix<- makeX(x_test)
+pred2<-predict(glm_model2, test_matrix, type="response", s=cvg2$lambda.1se)
+#calculate AUC
+auc_glm2<-auc(y_test$h1n1_vaccine, as.vector(pred2))
+auc_glm2
+
+```
+
+
+## 3 Results
+The following table summarizes the results for the AUC using the different models: 
+
+```{r summary table, echo=FALSE}
+results<- data.frame(Model= c("xgboost", "glmnet", "glmnet with one-hot-encoding"),
+                     AUC = c(auc_xgb, auc_glm1, auc_glm2))
+results
+```
+We can see that the xgboost model shows a better result than the glmnet models. 
+Using one-hot-encoding for the glmnet did not improve the AUC. It even resulted in a slightly lower AUC. Thus, it seems that assuming a linear relationship between the factor levels within the variables is suitable in this data set. 
+
+The best public score at the moment (January 6th of 2021) for predicting h1n1_vaccine and seasonal_vaccine is at 0.8658. We can not directly compare our value since our result is only for predicting the variable h1n1_vaccine, whereas the competition's score refers to the average of the AUC metric of the h1n1_vaccine and the seasonal_vaccine prediction tasks. However, our result seems to lie in a good range. 
+
+
+## 4 Conclusion 
+In conclusion, Xgboost and glmnet are suitable packages to tackle this prediction problem. The results for the xgboost model are very depending on the parameters. Thus, a more comprehensive optimization of the parameters (eta, gamma, subsample, max_depth, nrounds, colsample_bytree and others) could potentially further improve the results. 
+It would be interesting to calculate the result for the seasonal_vaccine as well in order to be able to better compare the result.
+
